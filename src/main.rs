@@ -65,7 +65,7 @@ fn handle_client(stream: TcpStream) -> io::Result<()> {
                     response.extend_from_slice(&path.as_bytes()[6..]);
                 },
                 _ => {
-                    status_code = 404;
+                    status_code = 200;
                 }
             }
         }
