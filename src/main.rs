@@ -41,7 +41,7 @@ fn handle_client(mut stream: TcpStream) -> io::Result<()> {
         }
         _data.extend_from_slice(line.as_bytes());
     }
-    write!(stream, "HTTP/1.1 {}", status_code.as_msg().unwrap())?;
+    write!(stream, "HTTP/1.1 {}\r\n\r\n", status_code.as_msg().unwrap())?;
     Ok(())
 }
 
