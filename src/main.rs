@@ -60,14 +60,14 @@ fn handle_client(stream: TcpStream) -> io::Result<()> {
                 .skip(1)
                 .next();
             match path {
+                Some("/") => {
+                    status_code = 200;
+                }
                 Some(path) if path.starts_with("/echo/") => {
                     status_code = 200;
                     response.extend_from_slice(&path.as_bytes()[6..]);
                 },
-                Some(_) => {
-                    status_code = 200;
-                },
-                None => {
+                _ => {
                     status_code = 404;
                 }
             }
