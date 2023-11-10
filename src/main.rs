@@ -76,7 +76,7 @@ fn handle_client(stream: TcpStream) -> io::Result<()> {
     }
 
     let content_length = response.len();
-    let headers: Vec<(&'static str, &dyn Display)> = vec![("Content-Type", &"text/plain"), ("Content-Len", &content_length)];
+    let headers: Vec<(&'static str, &dyn Display)> = vec![("Content-Type", &"text/plain"), ("Content-Length", &content_length)];
     HttpResponse {
         status_code,
         headers,
