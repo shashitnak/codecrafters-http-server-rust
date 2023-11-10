@@ -1,11 +1,11 @@
-use std::{net::{TcpListener, TcpStream}, thread, io::{self, Write, BufRead, BufReader}};
+use std::{net::{TcpListener, TcpStream}, thread, io::{self, Write, BufRead, BufReader}, ops::Deref, fmt::{Debug, Display}, collections::HashMap};
 
 trait HttpStatus: Sized
 where
-    usize: TryFrom<Self>,
+    u32: TryFrom<Self>,
 {
     fn as_msg(self) -> Option<&'static str> {
-        let status_code: usize = self
+        let status_code: u32 = self
             .try_into()
             .ok()?;
 
@@ -19,12 +19,35 @@ where
 
 impl<T> HttpStatus for T
 where
-    usize: TryFrom<T> {}
+    u32: TryFrom<T> {}
 
-fn handle_client(mut stream: TcpStream) -> io::Result<()> {
+struct HttpResponse<'a> {
+    status_code: u32,
+    headers: Vec<(&'static str, &'a dyn Display)>,
+    body: &'a dyn Deref<Target=[u8]>
+}
+
+impl<'a> HttpResponse<'a> {
+    fn write_to_writer(&self, mut writer: impl Write) -> io::Result<()> {
+        write!(writer, "HTTP/1.1 {}\r\n", self.status_code.as_msg().unwrap())?;
+
+        for (key, value) in self.headers.iter() {
+            write!(writer, "{key}: {value}\r\n")?;
+        }
+
+        write!(writer, "\r\n")?;
+        writer.write_all(&self.body)?;
+        write!(writer, "\r\n")?;
+
+        Ok(())
+    }
+}
+
+fn handle_client(stream: TcpStream) -> io::Result<()> {
     let mut _data = vec![];
     let mut reader = BufReader::new(&stream);
     let mut status_code = 404;
+    let mut response = vec![];
     loop {
         let mut line = String::new();
         reader.read_line(&mut line)?;
@@ -32,16 +55,32 @@ fn handle_client(mut stream: TcpStream) -> io::Result<()> {
             break;
         }
         if line.starts_with("GET") {
-            if let Some("/") = line
+            let path = line
                 .split_ascii_whitespace()
                 .skip(1)
-                .next() {
+                .next();
+            match path {
+                Some(path) if path.starts_with("/echo/") => {
                     status_code = 200;
+                    response.extend_from_slice(&path.as_bytes()[6..]);
+                },
+                _ => {
+                    status_code = 404;
                 }
+            }
         }
         _data.extend_from_slice(line.as_bytes());
     }
-    write!(stream, "HTTP/1.1 {}\r\n\r\n", status_code.as_msg().unwrap())?;
+
+    let content_length = response.len();
+    let headers: Vec<(&'static str, &dyn Display)> = vec![("Content-Type", &"text/plain"), ("Content-Len", &content_length)];
+    HttpResponse {
+        status_code,
+        headers,
+        body: &response
+    }
+        .write_to_writer(stream)?;
+    
     Ok(())
 }
 
