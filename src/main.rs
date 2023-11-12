@@ -230,6 +230,7 @@ fn main() {
         match stream {
             Ok(stream) => {
                 println!("accepted new connection");
+                // dummy change
                 thread::spawn(|| handle_client(stream));
             }
             Err(e) => {
