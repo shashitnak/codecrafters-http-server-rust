@@ -61,6 +61,123 @@ struct HttpResponse {
     body: Vec<u8>
 }
 
+trait Status {
+    fn status_code(self) -> u32;
+}
+struct NoStatus;
+impl Status for NoStatus {
+    fn status_code(self) -> u32 {
+        200
+    }
+}
+
+struct StatusCode(u32);
+impl Status for StatusCode {
+    fn status_code(self) -> u32 {
+        self.0
+    }
+}
+
+trait Header {
+    fn header(self) -> Vec<(&'static str, Box<dyn Display>)>;
+}
+struct NoHeaders;
+impl Header for NoHeaders {
+    fn header(self) -> Vec<(&'static str, Box<dyn Display>)> {
+        vec![("Content-Type", Box::new("text/plain"))]
+    }
+}
+
+struct Headers(Vec<(&'static str, Box<dyn Display>)>);
+impl Header for Headers {
+    fn header(self) -> Vec<(&'static str, Box<dyn Display>)> {
+        self.0
+    }
+}
+
+trait HttpBody {
+    fn body(self) -> Vec<u8>;
+}
+struct NoBody;
+impl HttpBody for NoBody {
+    fn body(self) -> Vec<u8> {
+        vec![]
+    }
+}
+struct Body(Vec<u8>);
+impl HttpBody for Body {
+    fn body(self) -> Vec<u8> {
+        self.0
+    }
+}
+
+struct HttpResponseBuilder<S: Status, H: Header, B: HttpBody> {
+    status_code: S,
+    headers: H,
+    body: B
+}
+
+impl HttpResponseBuilder<NoStatus, NoHeaders, NoBody> {
+    fn new() -> Self {
+        Self {
+            status_code: NoStatus,
+            headers: NoHeaders,
+            body: NoBody
+        }
+    }
+}
+
+impl<H: Header, B: HttpBody> HttpResponseBuilder<NoStatus, H, B> {
+    fn status(self, status_code: u32) -> HttpResponseBuilder<StatusCode, H, B> {
+        HttpResponseBuilder {
+            status_code: StatusCode(status_code),
+            headers: self.headers,
+            body: self.body
+        }
+    }
+}
+
+impl<S: Status, B: HttpBody> HttpResponseBuilder<S, NoHeaders, B> {
+    fn header(self, key: &'static str, val: impl Display + 'static) -> HttpResponseBuilder<S, Headers, B> {
+        HttpResponseBuilder {
+            status_code: self.status_code,
+            headers: Headers(vec![]),
+            body: self.body
+        }
+        .header(key, val)
+    }
+}
+
+impl<S: Status, B: HttpBody> HttpResponseBuilder<S, Headers, B> {
+    fn header(mut self, key: &'static str, val: impl Display + 'static) -> HttpResponseBuilder<S, Headers, B> {
+        self.headers.0.push((key, Box::new(val)));
+        self
+    }
+}
+
+impl<S: Status, H: Header> HttpResponseBuilder<S, H, NoBody> {
+    fn body(self, body: Vec<u8>) -> HttpResponseBuilder<S, H, Body> {
+        HttpResponseBuilder {
+            status_code: self.status_code,
+            headers: self.headers,
+            body: Body(body)
+        }
+    }
+}
+
+impl<S: Status, H: Header, B: HttpBody> HttpResponseBuilder<S, H, B> {
+    fn into_http_response(self) -> HttpResponse {
+        let mut headers = self.headers.header();
+        let body = self.body.body();
+        headers.push(("Content-Length", Box::new(body.len())));
+        HttpResponse {
+            status_code: self.status_code.status_code(),
+            headers,
+            body
+        }
+    }
+}
+
 impl<'a> HttpResponse {
     fn write_to_writer(&self, mut writer: impl Write) -> io::Result<()> {
         write!(writer, "HTTP/1.1 {}\r\n", self.status_code.as_msg().unwrap())?;
@@ -75,31 +192,46 @@ impl<'a> HttpResponse {
 
         Ok(())
     }
+
+    fn body(body: Vec<u8>) -> HttpResponse {
+        let content_length = body.len();
+
+        HttpResponse {
+            status_code: 200,
+            headers: vec![("Content-Length", Box::new(content_length))],
+            body
+        }
+    }
 }
 
 trait Responder<'a> {
-    fn respond(&self, request: HttpRequest<'a>) -> Result<Vec<u8>, io::Error>;
+    fn respond(&self, request: HttpRequest<'a>) -> Result<HttpResponse, io::Error>;
 }
 
 struct ErrorResponder;
 impl<'a> Responder<'a> for ErrorResponder {
-    fn respond(&self, _request: HttpRequest<'a>) -> Result<Vec<u8>, io::Error> {
+    fn respond(&self, _request: HttpRequest<'a>) -> Result<HttpResponse, io::Error> {
         Err(error("Not Found"))
     }
 }
 
 struct EmptyResponder;
 impl<'a> Responder<'a> for EmptyResponder {
-    fn respond(&self, _request: HttpRequest<'a>) -> Result<Vec<u8>, io::Error> {
-        Ok(vec![])
+    fn respond(&self, _request: HttpRequest<'a>) -> Result<HttpResponse, io::Error> {
+        Ok(HttpResponseBuilder::new()
+            .body(vec![])
+            .into_http_response())
     }
 }
 
 struct PathResponder;
 impl<'a> Responder<'a> for PathResponder {
-    fn respond(&self, request: HttpRequest<'a>) -> Result<Vec<u8>, io::Error> {
+    fn respond(&self, request: HttpRequest<'a>) -> Result<HttpResponse, io::Error> {
         if request.path.len() >= 6 {
-            Ok(request.path.as_bytes()[6..].to_vec())
+            let body = request.path.as_bytes()[6..].to_vec();
+            Ok(HttpResponseBuilder::new()
+                .body(body)
+                .into_http_response())
         } else {
             Err(error("Invalid Path"))
         }
@@ -108,7 +240,7 @@ impl<'a> Responder<'a> for PathResponder {
 
 struct UserAgentResponder;
 impl<'a> Responder<'a> for UserAgentResponder {
-    fn respond(&self, request: HttpRequest<'a>) -> Result<Vec<u8>, io::Error> {
+    fn respond(&self, request: HttpRequest<'a>) -> Result<HttpResponse, io::Error> {
         let mut response = vec![];
         for (key, value) in request.headers.iter() {
             match key.as_str() {
@@ -118,7 +250,9 @@ impl<'a> Responder<'a> for UserAgentResponder {
                 _ => {}
             }
         }
-        Ok(response)
+        Ok(HttpResponseBuilder::new()
+            .body(response)
+            .into_http_response())
     }
 }
 
@@ -127,7 +261,7 @@ struct FileResponder {
 }
 
 impl<'a> Responder<'a> for FileResponder {
-    fn respond(&self, request: HttpRequest<'a>) -> Result<Vec<u8>, io::Error> {
+    fn respond(&self, request: HttpRequest<'a>) -> Result<HttpResponse, io::Error> {
         let filename = std::str::from_utf8(&request.path.as_bytes()[7..])
             .map_err(|err| error(format!("{err}")))?;
 
@@ -137,7 +271,10 @@ impl<'a> Responder<'a> for FileResponder {
         fs::File::open(file_path)?
             .read_to_end(&mut data)?;
 
-        Ok(data)
+        Ok(HttpResponseBuilder::new()
+            .header("Content-Type", Box::new("application/octet-stream"))
+            .body(data)
+            .into_http_response())
     }
 }
 
@@ -244,32 +381,30 @@ impl Data {
 
 impl<'a> From<(HttpRequest<'a>, Arc<Data>)> for HttpResponse {
     fn from((value, data): (HttpRequest<'a>, Arc<Data>)) -> Self {
-        let body = (|| {
-            value
+        value
             .clone()
             .path
             .dispatch(data)
-            .ok()?
-            .respond(value)
             .ok()
-        })();
+            .and_then(|responder| responder.respond(value).ok())
+            .unwrap_or(HttpResponseBuilder::new().into_http_response())
 
-        let (status_code, body) = match body {
-            Some(body) => (200, body),
-            None => (404, vec![])
-        };
+        // let (status_code, body) = match body {
+        //     Some(body) => (200, body),
+        //     None => (404, vec![])
+        // };
 
-        let headers: Vec<(&'static str, Box<dyn Display>)> = vec![
-            ("Content-Type", Box::new("text/plain")),
-            ("Content-Length", Box::new(body.len()))
-        ];
+        // let headers: Vec<(&'static str, Box<dyn Display>)> = vec![
+        //     ("Content-Type", Box::new("text/plain")),
+        //     ("Content-Length", Box::new(body.len()))
+        // ];
 
 
-        HttpResponse {
-            status_code,
-            headers,
-            body
-        }
+        // HttpResponse {
+        //     status_code,
+        //     headers,
+        //     body
+        // }
     }
 }
 
