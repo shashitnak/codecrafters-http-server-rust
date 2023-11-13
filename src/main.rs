@@ -452,7 +452,7 @@ fn handle_client(mut stream: TcpStream, data: Arc<Data>) -> io::Result<()> {
     let response: HttpResponse = (http_request, data)
         .try_into()
         .unwrap_or_else(|err| HttpResponseBuilder::new()
-            .status(500)
+            .status(404)
             .body(format!("{err}").into_bytes())
             .into_http_response()
         );
