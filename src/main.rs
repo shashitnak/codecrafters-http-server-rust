@@ -387,7 +387,7 @@ impl<'a> From<(HttpRequest<'a>, Arc<Data>)> for HttpResponse {
             .dispatch(data)
             .ok()
             .and_then(|responder| responder.respond(value).ok())
-            .unwrap_or(HttpResponseBuilder::new().into_http_response())
+            .unwrap_or(HttpResponseBuilder::new().status(404).into_http_response())
 
         // let (status_code, body) = match body {
         //     Some(body) => (200, body),
