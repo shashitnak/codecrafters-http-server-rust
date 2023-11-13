@@ -213,7 +213,9 @@ trait Responder {
 struct ErrorResponder;
 impl Responder for ErrorResponder {
     fn respond(&self, _request: HttpRequest) -> Result<HttpResponse, io::Error> {
-        Err(error("Not Found"))
+        Ok(HttpResponseBuilder::new()
+            .status(404)
+            .into_http_response())
     }
 }
 
@@ -221,6 +223,7 @@ struct EmptyResponder;
 impl Responder for EmptyResponder {
     fn respond(&self, _request: HttpRequest) -> Result<HttpResponse, io::Error> {
         Ok(HttpResponseBuilder::new()
+            .header("Content-Type", "text/plain")
             .body(vec![])
             .into_http_response())
     }
@@ -254,6 +257,7 @@ impl Responder for UserAgentResponder {
             }
         }
         Ok(HttpResponseBuilder::new()
+            .header("Content-Type", "text/plain")
             .body(response)
             .into_http_response())
     }
@@ -264,13 +268,13 @@ struct FileResponder {
 }
 
 impl FileResponder {
-    fn get_response(&self, file_path: PathBuf, request: HttpRequest) -> Result<HttpResponse, io::Error> {
+    fn get_response(&self, file_path: PathBuf, _request: HttpRequest) -> Result<HttpResponse, io::Error> {
         let mut data = vec![];
         fs::File::open(file_path)?
             .read_to_end(&mut data)?;
 
         Ok(HttpResponseBuilder::new()
-            .header("Content-Type", Box::new("application/octet-stream"))
+            .header("Content-Type", "application/octet-stream")
             .body(data)
             .into_http_response())
     }
@@ -446,8 +450,9 @@ fn handle_client(mut stream: TcpStream, data: Arc<Data>) -> io::Result<()> {
 
     let response: HttpResponse = (http_request, data)
         .try_into()
-        .unwrap_or(HttpResponseBuilder::new()
-            .status(404)
+        .unwrap_or_else(|err| HttpResponseBuilder::new()
+            .status(500)
+            .body(format!("{err}").into_bytes())
             .into_http_response()
         );
 
