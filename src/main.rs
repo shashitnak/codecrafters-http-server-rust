@@ -1,4 +1,5 @@
-use std::{net::{TcpListener, TcpStream}, thread, io::{self, Write, BufRead, BufReader}, ops::Deref, fmt::Display, collections::HashMap, str::Utf8Error};
+use std::{net::{TcpListener, TcpStream}, thread, io::{self, Write, BufRead, BufReader, Read}, ops::Deref, fmt::Display, collections::HashMap, str::Utf8Error, path::{self, PathBuf}, any::Any, fs};
+use std::sync::{Arc, Mutex};
 
 
 fn error(msg: impl AsRef<str>) -> io::Error {
@@ -121,6 +122,25 @@ impl<'a> Responder<'a> for UserAgentResponder {
     }
 }
 
+struct FileResponder {
+    path: PathBuf
+}
+
+impl<'a> Responder<'a> for FileResponder {
+    fn respond(&self, request: HttpRequest<'a>) -> Result<Vec<u8>, io::Error> {
+        let filename = std::str::from_utf8(&request.path.as_bytes()[7..])
+            .map_err(|err| error(format!("{err}")))?;
+
+        let file_path = self.path.join(filename);
+
+        let mut data = vec![];
+        fs::File::open(file_path)?
+            .read_to_end(&mut data)?;
+
+        Ok(data)
+    }
+}
+
 type Path<'a> = String;
 
 #[derive(Clone)]
@@ -165,14 +185,22 @@ trait ReadHttpRequest<'a>: BufRead + Sized {
 impl<'a, R: BufRead> ReadHttpRequest<'a> for R {}
 
 trait PathDispatch: AsRef<str> {
-    fn dispatch(&self) -> Box<dyn Responder> {
-        match self.as_ref() {
+    fn dispatch(&self, data: Arc<Data>) -> Result<Box<dyn Responder>, io::Error> {
+        Ok(match self.as_ref() {
             "/" => Box::new(EmptyResponder),
             "/user-agent" => Box::new(UserAgentResponder),
             other if other.starts_with("/echo/")
                 => Box::new(PathResponder),
+            other if other.starts_with("/files/")
+                => {
+                    if let Some(path) = data.get::<PathBuf>() {
+                        Box::new(FileResponder { path: path.clone() })
+                    } else {
+                        Err(error("No Directory provided"))?
+                    }
+                },
             _ => Box::new(ErrorResponder)
-        }
+        })
     }
 }
 
@@ -181,14 +209,50 @@ where
     P: AsRef<str>
 {}
 
-impl<'a> From<HttpRequest<'a>> for HttpResponse {
-    fn from(value: HttpRequest<'a>) -> Self {
-        let body = value
+
+
+
+trait MyAny: Send + Sized + Clone {
+    fn downcast<T>(&self) -> &T;
+}
+
+struct Data {
+    datas: Vec<Arc<dyn Any + Send + Sync>>
+}
+
+impl Data {
+    fn new() -> Self {
+        Data { datas: vec![] }
+    }
+
+    fn insert<T: Any + Send + Sync>(&mut self, val: T) {
+        self.datas.push(Arc::new(val));
+    }
+
+    fn get<T: Any + Send + Sync>(&self) -> Option<&T> {
+        self
+            .datas
+            .iter()
+            .fold(None, |res, data| {
+                match res {
+                    res@Some(_) => res,
+                    None => data.downcast_ref::<T>()
+                }
+            })
+    }
+}
+
+impl<'a> From<(HttpRequest<'a>, Arc<Data>)> for HttpResponse {
+    fn from((value, data): (HttpRequest<'a>, Arc<Data>)) -> Self {
+        let body = (|| {
+            value
             .clone()
             .path
-            .dispatch()
+            .dispatch(data)
+            .ok()?
             .respond(value)
-            .ok();
+            .ok()
+        })();
 
         let (status_code, body) = match body {
             Some(body) => (200, body),
@@ -209,12 +273,13 @@ impl<'a> From<HttpRequest<'a>> for HttpResponse {
     }
 }
 
-fn handle_client(mut stream: TcpStream) -> io::Result<()> {
+
+fn handle_client(mut stream: TcpStream, data: Arc<Data>) -> io::Result<()> {
     let mut buf_reader = BufReader::new(&mut stream);
     let http_request = buf_reader
         .read_http_request()?;
 
-    let response: HttpResponse = http_request
+    let response: HttpResponse = (http_request, data)
         .into();
 
     response
@@ -224,14 +289,25 @@ fn handle_client(mut stream: TcpStream) -> io::Result<()> {
 }
 
 fn main() {
+    let mut data = Data::new();
+
+    let args1 = std::env::args();
+    let args2 = std::env::args().skip(1);
+    for (arg1, arg2) in args1.zip(args2) {
+        if arg1.as_str() == "--directory" {
+            data.insert(path::Path::new(&arg2).to_path_buf());
+        }
+    }
+
     let listener = TcpListener::bind("127.0.0.1:4221").unwrap();
     
+    let data = Arc::new(data);
     for stream in listener.incoming() {
         match stream {
             Ok(stream) => {
                 println!("accepted new connection");
-                // dummy change
-                thread::spawn(|| handle_client(stream));
+                let data = data.clone();
+                thread::spawn(move || handle_client(stream, data));
             }
             Err(e) => {
                 println!("error: {}", e);
