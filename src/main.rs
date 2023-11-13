@@ -48,6 +48,7 @@ where
             200 => "200 OK",
             404 => "404 Not Found",
             201 => "201 OK",
+            500 => "500 Internal Server Error",
             _ => None?
         })
     }
