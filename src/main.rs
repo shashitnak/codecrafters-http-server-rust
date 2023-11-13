@@ -296,6 +296,7 @@ impl FileResponder {
 
         Ok(HttpResponseBuilder::new()
             .status(201)
+            .header("Content-Type", "text/plain")
             .into_http_response())
     }
 }
