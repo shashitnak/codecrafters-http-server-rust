@@ -1,6 +1,7 @@
 use std::{net::{TcpListener, TcpStream}, thread, io::{self, Write, BufRead, BufReader, Read}, ops::Deref, fmt::Display, collections::HashMap, str::Utf8Error, path::{self, PathBuf}, any::Any, fs};
 use std::sync::{Arc, Mutex};
 
+const BUFFER_SIZE: usize = 4096;
 
 fn error(msg: impl AsRef<str>) -> io::Error {
     io::Error::new(io::ErrorKind::InvalidData, msg.as_ref())
@@ -46,6 +47,7 @@ where
         Some(match status_code {
             200 => "200 OK",
             404 => "404 Not Found",
+            201 => "201 OK",
             _ => None?
         })
     }
@@ -84,7 +86,7 @@ trait Header {
 struct NoHeaders;
 impl Header for NoHeaders {
     fn header(self) -> Vec<(&'static str, Box<dyn Display>)> {
-        vec![("Content-Type", Box::new("text/plain"))]
+        vec![]
     }
 }
 
@@ -178,7 +180,7 @@ impl<S: Status, H: Header, B: HttpBody> HttpResponseBuilder<S, H, B> {
     }
 }
 
-impl<'a> HttpResponse {
+impl HttpResponse {
     fn write_to_writer(&self, mut writer: impl Write) -> io::Result<()> {
         write!(writer, "HTTP/1.1 {}\r\n", self.status_code.as_msg().unwrap())?;
 
@@ -204,20 +206,20 @@ impl<'a> HttpResponse {
     }
 }
 
-trait Responder<'a> {
-    fn respond(&self, request: HttpRequest<'a>) -> Result<HttpResponse, io::Error>;
+trait Responder {
+    fn respond(&self, request: HttpRequest) -> Result<HttpResponse, io::Error>;
 }
 
 struct ErrorResponder;
-impl<'a> Responder<'a> for ErrorResponder {
-    fn respond(&self, _request: HttpRequest<'a>) -> Result<HttpResponse, io::Error> {
+impl Responder for ErrorResponder {
+    fn respond(&self, _request: HttpRequest) -> Result<HttpResponse, io::Error> {
         Err(error("Not Found"))
     }
 }
 
 struct EmptyResponder;
-impl<'a> Responder<'a> for EmptyResponder {
-    fn respond(&self, _request: HttpRequest<'a>) -> Result<HttpResponse, io::Error> {
+impl Responder for EmptyResponder {
+    fn respond(&self, _request: HttpRequest) -> Result<HttpResponse, io::Error> {
         Ok(HttpResponseBuilder::new()
             .body(vec![])
             .into_http_response())
@@ -225,11 +227,12 @@ impl<'a> Responder<'a> for EmptyResponder {
 }
 
 struct PathResponder;
-impl<'a> Responder<'a> for PathResponder {
-    fn respond(&self, request: HttpRequest<'a>) -> Result<HttpResponse, io::Error> {
+impl Responder for PathResponder {
+    fn respond(&self, request: HttpRequest) -> Result<HttpResponse, io::Error> {
         if request.path.len() >= 6 {
             let body = request.path.as_bytes()[6..].to_vec();
             Ok(HttpResponseBuilder::new()
+                .header("Content-Type", "text/plain")
                 .body(body)
                 .into_http_response())
         } else {
@@ -239,8 +242,8 @@ impl<'a> Responder<'a> for PathResponder {
 }
 
 struct UserAgentResponder;
-impl<'a> Responder<'a> for UserAgentResponder {
-    fn respond(&self, request: HttpRequest<'a>) -> Result<HttpResponse, io::Error> {
+impl Responder for UserAgentResponder {
+    fn respond(&self, request: HttpRequest) -> Result<HttpResponse, io::Error> {
         let mut response = vec![];
         for (key, value) in request.headers.iter() {
             match key.as_str() {
@@ -260,13 +263,8 @@ struct FileResponder {
     path: PathBuf
 }
 
-impl<'a> Responder<'a> for FileResponder {
-    fn respond(&self, request: HttpRequest<'a>) -> Result<HttpResponse, io::Error> {
-        let filename = std::str::from_utf8(&request.path.as_bytes()[7..])
-            .map_err(|err| error(format!("{err}")))?;
-
-        let file_path = self.path.join(filename);
-
+impl FileResponder {
+    fn get_response(&self, file_path: PathBuf, request: HttpRequest) -> Result<HttpResponse, io::Error> {
         let mut data = vec![];
         fs::File::open(file_path)?
             .read_to_end(&mut data)?;
@@ -276,50 +274,99 @@ impl<'a> Responder<'a> for FileResponder {
             .body(data)
             .into_http_response())
     }
-}
 
-type Path<'a> = String;
+    fn post_response(&self, file_path: PathBuf, mut request: HttpRequest) -> Result<HttpResponse, io::Error> {
+        let mut writer = fs::File::create(file_path)?;
+        let content_length = request
+            .headers
+            .get("Content-Length")
+            .ok_or(error("No Content-Length Found for request"))?
+            .parse::<usize>()
+            .map_err(|err| error(err.to_string()))?;
 
-#[derive(Clone)]
-struct HttpRequest<'a> {
-    path: Path<'a>,
-    headers: HashMap<String, String>,
-    body: &'a dyn BufRead
-}
+        let mut to_read = content_length;
+        let mut buffer = [0u8; BUFFER_SIZE];
 
-trait ReadHttpRequest<'a>: BufRead + Sized {
-    fn read_http_request(&'a mut self) -> Result<HttpRequest<'a>, io::Error> {
-        let mut header_head = String::new();
-        self.read_line(&mut header_head)?;
-        let words = header_head
-            .trim()
-            .split_ascii_whitespace();
-        let path = words
-            .skip(1)
-            .next()
-            .ok_or(error("No Path Found"))?
-            .to_string();
-
-        let mut headers = HashMap::new();
-        loop {
-            let mut line = String::new();
-            self.read_line(&mut line)?;
-            if let Some((key, val)) = line.trim().split_once(": ") {
-                headers.insert(key.to_string(), val.to_string());
-            } else {
-                break
-            }
+        while to_read > 0 {
+            let bytes_to_read = std::cmp::min(BUFFER_SIZE, to_read);
+            request.body.read_exact(&mut buffer[0..bytes_to_read])?;
+            writer.write_all(&buffer[0..bytes_to_read])?;
+            to_read -= bytes_to_read;
         }
 
-        Ok(HttpRequest {
-            path,
-            headers,
-            body: self
-        })
+        Ok(HttpResponseBuilder::new()
+            .status(201)
+            .into_http_response())
     }
 }
 
-impl<'a, R: BufRead> ReadHttpRequest<'a> for R {}
+impl Responder for FileResponder {
+    fn respond(&self, request: HttpRequest) -> Result<HttpResponse, io::Error> {
+        let filename = std::str::from_utf8(&request.path.as_bytes()[7..])
+            .map_err(|err| error(format!("{err}")))?;
+        let file_path = self.path.join(filename);
+
+        match request.method {
+            HttpRequestMethod::Get => self.get_response(file_path, request),
+            HttpRequestMethod::Post => self.post_response(file_path, request)
+        }
+    }
+}
+
+type Path = String;
+
+#[derive(Clone)]
+enum HttpRequestMethod {
+    Get,
+    Post
+}
+
+struct HttpRequest<'a> {
+    method: HttpRequestMethod,
+    path: Path,
+    headers: HashMap<String, String>,
+    body: BufReader<&'a mut TcpStream>
+}
+
+fn read_http_request(mut reader: BufReader<&mut TcpStream>) -> Result<HttpRequest, io::Error> {
+    let mut header_head = String::new();
+    reader.read_line(&mut header_head)?;
+    let mut words = header_head
+        .trim()
+        .split_ascii_whitespace();
+    let method = words
+        .next()
+        .ok_or(error("No HttpMethod Found"))?;
+
+    let method = match method {
+        "GET" => HttpRequestMethod::Get,
+        "POST" => HttpRequestMethod::Post,
+        val => Err(error(format!("Invalid HttpMethod Found: {val}")))?
+    };
+
+    let path = words
+        .next()
+        .ok_or(error("No Path Found"))?
+        .to_string();
+
+    let mut headers = HashMap::new();
+    loop {
+        let mut line = String::new();
+        reader.read_line(&mut line)?;
+        if let Some((key, val)) = line.trim().split_once(": ") {
+            headers.insert(key.to_string(), val.to_string());
+        } else {
+            break
+        }
+    }
+
+    Ok(HttpRequest {
+        method,
+        path,
+        headers,
+        body: reader
+    })
+}
 
 trait PathDispatch: AsRef<str> {
     fn dispatch(&self, data: Arc<Data>) -> Result<Box<dyn Responder>, io::Error> {
@@ -379,43 +426,25 @@ impl Data {
     }
 }
 
-impl<'a> From<(HttpRequest<'a>, Arc<Data>)> for HttpResponse {
-    fn from((value, data): (HttpRequest<'a>, Arc<Data>)) -> Self {
+impl<'a> TryFrom<(HttpRequest<'a>, Arc<Data>)> for HttpResponse {
+    type Error = io::Error;
+
+    fn try_from((value, data): (HttpRequest<'a>, Arc<Data>)) -> Result<Self, Self::Error> {
         value
-            .clone()
             .path
-            .dispatch(data)
-            .ok()
-            .and_then(|responder| responder.respond(value).ok())
-            .unwrap_or(HttpResponseBuilder::new().status(404).into_http_response())
-
-        // let (status_code, body) = match body {
-        //     Some(body) => (200, body),
-        //     None => (404, vec![])
-        // };
-
-        // let headers: Vec<(&'static str, Box<dyn Display>)> = vec![
-        //     ("Content-Type", Box::new("text/plain")),
-        //     ("Content-Length", Box::new(body.len()))
-        // ];
-
-
-        // HttpResponse {
-        //     status_code,
-        //     headers,
-        //     body
-        // }
+            .clone()
+            .dispatch(data)?
+            .respond(value)
     }
 }
 
 
 fn handle_client(mut stream: TcpStream, data: Arc<Data>) -> io::Result<()> {
     let mut buf_reader = BufReader::new(&mut stream);
-    let http_request = buf_reader
-        .read_http_request()?;
+    let http_request = read_http_request(buf_reader)?;
 
     let response: HttpResponse = (http_request, data)
-        .into();
+        .try_into()?;
 
     response
         .write_to_writer(stream)?;
@@ -442,7 +471,11 @@ fn main() {
             Ok(stream) => {
                 println!("accepted new connection");
                 let data = data.clone();
-                thread::spawn(move || handle_client(stream, data));
+                thread::spawn(move || {
+                    if let Err(err) = handle_client(stream, data) {
+                        println!("handle_client failed with: {err:?}");
+                    }
+                });
             }
             Err(e) => {
                 println!("error: {}", e);
