@@ -338,9 +338,9 @@ fn read_http_request(mut reader: BufReader<&mut TcpStream>) -> Result<HttpReques
         .next()
         .ok_or(error("No HttpMethod Found"))?;
 
-    let method = match method {
-        "GET" => HttpRequestMethod::Get,
-        "POST" => HttpRequestMethod::Post,
+    let method = match method.to_lowercase().as_str() {
+        "get" => HttpRequestMethod::Get,
+        "post" => HttpRequestMethod::Post,
         val => Err(error(format!("Invalid HttpMethod Found: {val}")))?
     };
 
@@ -440,11 +440,15 @@ impl<'a> TryFrom<(HttpRequest<'a>, Arc<Data>)> for HttpResponse {
 
 
 fn handle_client(mut stream: TcpStream, data: Arc<Data>) -> io::Result<()> {
-    let mut buf_reader = BufReader::new(&mut stream);
+    let buf_reader = BufReader::new(&mut stream);
     let http_request = read_http_request(buf_reader)?;
 
     let response: HttpResponse = (http_request, data)
-        .try_into()?;
+        .try_into()
+        .unwrap_or(HttpResponseBuilder::new()
+            .status(404)
+            .into_http_response()
+        );
 
     response
         .write_to_writer(stream)?;
